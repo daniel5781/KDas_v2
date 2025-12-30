@@ -776,3 +776,140 @@ def calculate_standard_metrics(G_directed, weight='weight'):
             std_efficiencies[n] = 0.0
             
     return std_constraints, std_efficiencies
+
+
+@st.cache_data
+def extract_network_method_b(matrix):
+    """
+    Method A: 무한급수(Infinite Series) 확장을 통한 네트워크 추출
+    구조: threshold_count 함수와 동일한 흐름 (계산 -> 시각화 -> 결과반환)
+    """
+    # -------------------------------------------------------------------------
+    # 0. 데이터 준비
+    # -------------------------------------------------------------------------
+    if hasattr(matrix, 'to_numpy'):
+        mat_data = matrix.to_numpy()
+    else:
+        mat_data = np.array(matrix)
+        
+    A = mat_data.copy().astype(float)
+    np.fill_diagonal(A, 0) # 대각 성분 0 처리
+    
+    n = A.shape[0]
+    
+    # 파라미터 설정 (Pseudo-code 기준)
+    epsilon = 0.1          # 10% 기준
+    max_iter = 20          # 무한 루프 방지용 안전 장치
+    
+    # 초기값 (k=0)
+    N_accum = np.zeros((n, n)) # N0
+    s_accum = 0.0              # s0
+    
+    # 시각화를 위한 리스트
+    k_list = []
+    ratio_list = []
+    s_list = []
+
+    # -------------------------------------------------------------------------
+    # 1. Iteration: M(k) = A^k 및 Reduce 수행
+    # -------------------------------------------------------------------------
+    final_k = 0
+    converged = False
+    
+    # k는 1부터 시작
+    for k in range(1, max_iter + 1):
+        # M(k) = A^k
+        try:
+            M_k = np.linalg.matrix_power(A, k)
+        except:
+            break # 수치적 발산 등 에러 시 중단
+
+        # s(k) 계산: 대각 성분 제외 원소 합
+        off_diag_mask = ~np.eye(n, dtype=bool)
+        vals = M_k[off_diag_mask]
+        s_k = np.sum(vals)
+        
+        # av(k) 계산: 평균
+        if (n*n - n) > 0:
+            av_k = s_k / (n*n - n)
+        else:
+            av_k = 0
+            
+        # "M(k) reduce": av(k)보다 작은 원소 0 처리 (Local Copy)
+        M_k_reduced = np.where(M_k < av_k, 0, M_k)
+        
+        # Reduced 된 값 기준으로 s(k) 재계산 (누적을 위해)
+        vals_reduced = M_k_reduced[off_diag_mask]
+        s_k_reduced = np.sum(vals_reduced)
+        
+        # ratio_change 계산
+        # Pseudo-code의 (s0 + s(k))/s0 논리는 항상 > 1 이므로,
+        # 수렴 판단을 위해 '새로 추가되는 정보량의 비율' (s_k / s0)로 해석하여 구현
+        if s_accum == 0:
+            ratio_change = 1.0 # 첫 턴은 무조건 진행
+        else:
+            ratio_change = s_k_reduced / s_accum
+            
+        # 기록 저장
+        k_list.append(k)
+        ratio_list.append(ratio_change)
+        s_list.append(s_accum + s_k_reduced)
+        
+        # 누적 수행: N0 = N0 + M(k), s0 = s0 + s(k)
+        N_accum = N_accum + M_k_reduced
+        s_accum = s_accum + s_k_reduced
+        final_k = k
+        
+        # 종료 조건 (Convergence Check)
+        if k > 1 and ratio_change <= epsilon:
+            converged = True
+            break
+
+    # -------------------------------------------------------------------------
+    # 2. 시각화 (Dual Axis: Change Ratio vs Total Info)
+    # -------------------------------------------------------------------------
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+
+    # [왼쪽 축] 변화율 (Convergence Ratio)
+    color1 = 'tab:red'
+    ax1.set_xlabel('Iteration (k)')
+    ax1.set_ylabel('Change Ratio (New/Total)', color=color1, fontweight='bold')
+    ax1.plot(k_list, ratio_list, color=color1, marker='o', label='Ratio Change', linewidth=2)
+    ax1.tick_params(axis='y', labelcolor=color1)
+    ax1.grid(True, alpha=0.3)
+    
+    # Epsilon 기준선
+    ax1.axhline(y=epsilon, color='gray', linestyle='--', label=f'Epsilon ({epsilon})')
+
+    # [오른쪽 축] 누적 정보량 (Total Sum s0)
+    ax2 = ax1.twinx()
+    color2 = 'tab:blue'
+    ax2.set_ylabel('Accumulated Signal (s0)', color=color2, fontweight='bold')
+    ax2.plot(k_list, s_list, color=color2, linestyle='--', alpha=0.6, label='Total Signal (s0)')
+    ax2.tick_params(axis='y', labelcolor=color2)
+
+    # 범례 합치기
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+
+    plt.title(f'Method A Convergence: Stopped at k={final_k}')
+    fig.tight_layout()
+    st.pyplot(fig)
+    
+    # -------------------------------------------------------------------------
+    # 3. 사용자 선택 UI / 결과 안내
+    # -------------------------------------------------------------------------
+    status_msg = "수렴 완료 (Converged)" if converged else "최대 반복 도달 (Max Iter)"
+    
+    st.markdown(f"""
+    **Method A 추출 결과**
+    - **최종 반복 횟수 (k)**: `{final_k}` ({status_msg})
+    - **최종 누적 정보량 (s0)**: `{s_accum:.4f}`
+    - **마지막 변화율**: `{ratio_list[-1]:.4f}` (목표: $\le {epsilon}$)
+    
+    💡 **설명:** 행렬의 거듭제곱($A^k$)을 통해 간접 연결을 탐색하며, 정보량 증가분이 {epsilon*100}% 이하가 될 때까지 네트워크를 누적했습니다.
+    """)
+    
+    # 사용자가 원하는 network(행렬) 자체를 반환
+    return N_accum
