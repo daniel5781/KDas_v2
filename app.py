@@ -1042,7 +1042,7 @@ def main():
 
         st.header("2. 아래는 임계값을 기준으로 filtering 결과")
         st.subheader('threshold에 따른 생존비율 그래프')
-        threshold_count(st.session_state['df_for_leontief_with_label'].iloc[2:, 2:])
+        extract_network_method_b(st.session_state['df_for_leontief_with_label'].iloc[2:, 2:])
         col1, col2= st.columns(2)
         with col1:
             threshold = float(st.text_input('threshold를 입력하세요','0.000'))
