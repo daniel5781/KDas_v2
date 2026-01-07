@@ -529,9 +529,10 @@ def create_undirected_network(BN):
 @st.cache_data()
 def threshold_count(matrix):
     """
-    최적의 Threshold를 찾기 위해 두 가지 방식을 동시에 수행하고 비교합니다.
-    Method 2: 변화율의 안정화 시점 탐색 (Derivative Convergence)
-    Method 2-1: 원점(0,0)에서의 거리 최소화 (Distance Minimization)
+    [Integration Logic]
+    1. Method 2 (Derivative): 변화율 안정화 지점 계산 (기존 유지)
+    2. Method 2-1 (Distance): 원점 거리 최소화 지점 계산 (기존 유지 - 시작점 역할)
+    3. Connectivity Check: Method 2-1 지점에서 고립 노드 발생 시, 사라질 때까지 Threshold 하향 조정 (신규 추가)
     """
     # -------------------------------------------------------------------------
     # 0. 데이터 준비
@@ -541,20 +542,21 @@ def threshold_count(matrix):
     else:
         mat_data = np.array(matrix)
         
-    mat_data = mat_data.copy()
+    mat_data = mat_data.copy().astype(float)
     np.fill_diagonal(mat_data, 0) # 대각 성분 제외
     
     N = mat_data.shape[0]
     total_elements = N**2 - N
     
-    # x축 설정: 0부터 최대값까지 delta 간격
+    # x축 설정
     delta = 0.01
     max_val = np.max(mat_data)
     x_values = np.arange(0, max_val + delta, delta)
     
     # -------------------------------------------------------------------------
-    # 1. y(t) 계산: 생존율 (Survival Ratio)
+    # 1. 지표 계산: y(생존율) & w(변화율)
     # -------------------------------------------------------------------------
+    # y: Survival Ratio
     y_list = []
     for x in x_values:
         count = (mat_data >= x).sum()
@@ -562,22 +564,15 @@ def threshold_count(matrix):
         y_list.append(ratio)
     y = np.array(y_list)
 
-    # -------------------------------------------------------------------------
-    # [Method 2] 변화율(w) 기반 탐색 (User's Logic)
-    # -------------------------------------------------------------------------
-    # z(t) = {y(t) - y(t-1)} / delta  (음수, 기울기)
+    # w: Slope Change Rate (Method 2)
     if len(y) > 1:
         z = (y[1:] - y[:-1]) / delta
     else:
         z = np.zeros(len(y))
 
-    # w(t) = 2계 도함수 근사 (곡률)
-    # w(t) = |z(t) - z(t-1)| / delta (가속도의 크기) 
     w_list = []
     w_x_values = []
-    # z는 x[1]부터 시작하므로, w는 x[2]부터 시작
     for i in range(1, len(z)):
-        # 가속도(곡률)의 크기
         val_w = abs(z[i] - z[i-1]) / delta 
         w_list.append(val_w)
         if i+1 < len(x_values):
@@ -585,41 +580,63 @@ def threshold_count(matrix):
     w = np.array(w_list)
     w_x_values = np.array(w_x_values)
     
-    # Convergence Check: w(t-1) - w(t) <= epsilon
-    # 곡률이 급격히 줄어들다가 안정화되는(평평해지는) 첫 지점 찾기
+    # Method 2: Stability Check (기존 로직 유지)
     epsilon = 0.01
     opt_idx_method2 = 0
     found_method2 = False
     
-    # w 배열 인덱스 k는 x_values[k+2]에 해당
     for k in range(1, len(w)):
-        w_prev = w[k-1]
-        w_curr = w[k]
-        
-        # 감소하던 곡률의 변화량이 epsilon보다 작아지는 순간 (안정화)
-        # 단, 초반 노이즈 방지를 위해 x가 어느정도 진행된 후(k>3) 판단
-        if k > 3 and (w_prev - w_curr) <= epsilon:
-            opt_idx_method2 = k + 2 # x index 보정
+        if k > 3 and (w[k-1] - w[k]) <= epsilon:
+            opt_idx_method2 = k + 2
             found_method2 = True
             break
-            
     if not found_method2 and len(x_values) > 0:
-        opt_idx_method2 = len(x_values) - 1 # 못 찾으면 끝점
-        
+        opt_idx_method2 = len(x_values) - 1
+    
     threshold_method2 = x_values[opt_idx_method2] if len(x_values) > opt_idx_method2 else 0
 
     # -------------------------------------------------------------------------
-    # [Method 2-1] 원점 거리 최소화 (Distance Minimization)
-    # Target: Min( x^2 + y(x)^2 )
-
-    
+    # 2. Method 2-1 (Distance Minimization) - [기준점]
+    # -------------------------------------------------------------------------
     dist_sq = x_values**2 + y**2
     opt_idx_dist = np.argmin(dist_sq)
+    
     threshold_dist = x_values[opt_idx_dist]
     min_y = y[opt_idx_dist] if len(y) > opt_idx_dist else 0
 
     # -------------------------------------------------------------------------
-    # 시각화 (Dual Axis)
+    # 3. [Logic Addition] Connectivity Backtracking
+    # Method 2-1 지점(opt_idx_dist)에서 시작하여 0방향으로 스캔
+    # -------------------------------------------------------------------------
+    final_idx = opt_idx_dist
+    adjusted = False
+    
+    # 현재 최적점(Distance Min)부터 0까지 역순 탐색
+    for idx in range(opt_idx_dist, -1, -1):
+        t = x_values[idx]
+        
+        # Binary Masking
+        mask = (mat_data >= t) # 1 if connected, else 0
+        
+        # 고립 노드 체크 (Undirected 관점: In-degree + Out-degree == 0 이면 고립)
+        # mask 행렬에서 행의 합(Out) + 열의 합(In) 계산
+        degrees = mask.sum(axis=1) + mask.sum(axis=0)
+        
+        if np.any(degrees == 0):
+            # 고립 노드가 존재함 -> Threshold가 너무 높음 -> 계속 낮춤(Loop Continue)
+            continue
+        else:
+            # 고립 노드 없음 (All Connected) -> 멈춤
+            final_idx = idx
+            if idx < opt_idx_dist:
+                adjusted = True
+            break
+    
+    final_threshold = x_values[final_idx]
+    final_y = y[final_idx] if len(y) > final_idx else 0
+
+    # -------------------------------------------------------------------------
+    # 4. 시각화 (모든 지표 포함)
     # -------------------------------------------------------------------------
     fig, ax1 = plt.subplots(figsize=(10, 7))
 
@@ -627,41 +644,40 @@ def threshold_count(matrix):
     color1 = 'tab:blue'
     ax1.set_xlabel('Threshold (x)')
     ax1.set_ylabel('Survival Ratio (y)', color=color1, fontweight='bold')
-    ax1.plot(x_values, y, color=color1, label='y: Survival Ratio', linewidth=2)
+    ax1.plot(x_values, y, color=color1, label='y: Survival Ratio', linewidth=2, alpha=0.7)
     ax1.tick_params(axis='y', labelcolor=color1)
     ax1.grid(True, alpha=0.3)
     
-    # [오른쪽 축] w(t) Curve (추가됨)
+    # [오른쪽 축] w(t) Curve (기존 Method 2 시각화 유지)
     if len(w) > 0:
         ax2 = ax1.twinx()
         color2 = 'tab:orange'
         ax2.set_ylabel('Slope Change Rate (w)', color=color2, fontweight='bold')
-        # w(t)는 보통 초반에 매우 크고 뒤로 갈수록 작아지므로, 잘 보이게 투명도/스타일 조절
-        ax2.plot(w_x_values, w, color=color2, linestyle='--', alpha=0.6, label='w: Slope Change Rate')
+        ax2.plot(w_x_values, w, color=color2, linestyle='--', alpha=0.5, label='w: Slope Stability')
         ax2.tick_params(axis='y', labelcolor=color2)
-        
-        # w(t) 그래프가 너무 위로 솟으면 보기 힘들 수 있으므로 범위 제한 (선택사항)
-        # ax2.set_ylim(0, np.percentile(w, 95) * 1.5) # 상위 5% 이상 값은 잘라내서 확대 효과
 
-    # [시각적 보조 1] 등거리 곡선 (Iso-distance)
-    r_best = np.sqrt(threshold_dist**2 + min_y**2)
-    theta = np.linspace(0, np.pi/2, 200)
-    arc_x = r_best * np.cos(theta)
-    arc_y = r_best * np.sin(theta)
+    # [Indicator 1] Method 2 (Stability) - 회색 수직선
+    ax1.axvline(x=threshold_method2, color='gray', linestyle='-.', alpha=0.6,
+                label=f'Method 2 (Stable): {threshold_method2:.4f}')
+
+    # [Indicator 2] Method 2-1 (Distance Min) - 빨간 점 (원래의 수학적 최적점)
+    ax1.plot(threshold_dist, min_y, 'ro', markersize=8, alpha=0.6,
+             label=f'Method 2-1 (Dist Min): {threshold_dist:.4f}')
+
+    # [Indicator 3] Final Decision (No Isolated) - 초록색 별/X (최종 결정)
+    # 조정이 발생했다면 화살표와 함께 표시
+    label_final = f'Final (No Isolated): {final_threshold:.4f}'
     
-    max_x_plot = max(x_values) if len(x_values) > 0 else 1
-    mask = (arc_x <= max_x_plot * 1.1) & (arc_y <= 1.1)
-    ax1.plot(arc_x[mask], arc_y[mask], 'g:', linewidth=2, label='Min-Distance Horizon')
+    if adjusted:
+        # 조정된 경우: Method 2-1 -> Final 로 화살표 표시
+        ax1.annotate('', xy=(final_threshold, final_y), xytext=(threshold_dist, min_y),
+                     arrowprops=dict(arrowstyle="->", color='red', lw=2))
+        ax1.plot(final_threshold, final_y, 'X', color='red', markersize=12, zorder=10, label=label_final)
+    else:
+        # 조정 안 된 경우: 빨간 점 위에 초록색 테두리 등을 씌워 강조
+        ax1.plot(final_threshold, final_y, 'g*', markersize=14, zorder=10, label=label_final)
 
-    # [시각적 보조 2] Method 2 (회색 선)
-    ax1.axvline(x=threshold_method2, color='gray', linestyle='-.', alpha=0.8,
-                label=f'Method 2 (Stable w): {threshold_method2:.4f}')
-
-    # [시각적 보조 3] Method 2-1 (빨간 점)
-    ax1.plot(threshold_dist, min_y, 'ro', markersize=10, zorder=5,
-             label=f'Method 2-1 (Distance): {threshold_dist:.4f}')
-    
-    # 범례 합치기 (ax1 + ax2)
+    # 범례 통합
     lines1, labels1 = ax1.get_legend_handles_labels()
     if len(w) > 0:
         lines2, labels2 = ax2.get_legend_handles_labels()
@@ -669,23 +685,29 @@ def threshold_count(matrix):
     else:
         ax1.legend(loc='upper right')
 
-    plt.title('Threshold Optimization: Ratio(y) vs Change Rate(w)')
+    plt.title('Threshold Optimization: Distance Min + Connectivity Check')
     fig.tight_layout()
     st.pyplot(fig)
     
     # -------------------------------------------------------------------------
-    # 사용자 선택 UI
+    # 5. 결과 반환 및 설명
     # -------------------------------------------------------------------------
+    msg_adjustment = ""
+    if adjusted:
+        msg_adjustment = f"⚠️ 수학적 최적점(`{threshold_dist:.4f}`)에서 고립 노드가 발견되어, `{final_threshold:.4f}`로 하향 조정했습니다."
+    else:
+        msg_adjustment = f"✅ 수학적 최적점(`{threshold_dist:.4f}`)이 고립 노드 없이 안정적입니다."
+
     st.markdown(f"""
-    **최적 임계값 도출 결과**
-    - **Method 2 (변화율 안정화)**: `{threshold_method2:.4f}` (곡률 변화가 $\epsilon$ 이하로 떨어지는 지점)
-    - **Method 2-1 (원점 거리 최소화)**: `{threshold_dist:.4f}` (그래프가 원점에 가장 가까운 지점)
+    **최적 임계값 분석 결과**
+    - **Method 2 (Stability)**: `{threshold_method2:.4f}`
+    - **Method 2-1 (Dist Min)**: `{threshold_dist:.4f}` (Backtracking 시작점)
+    - **Final Decision**: `{final_threshold:.4f}`
     
-    💡 **추천:** **Method 2-1 (Distance)** 방식이 노이즈에 강하고, 데이터의 "무릎(Knee)" 구간을 기하학적으로 가장 잘 찾아냅니다.
+    {msg_adjustment}
     """)
     
-    # 사용자가 선택할 수 있도록 하거나, 추천값(Distance) 반환
-    return threshold_dist
+    return final_threshold
 
 def calculate_kim_metrics(G, weight='weight'):
     """
